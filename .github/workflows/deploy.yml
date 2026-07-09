@@ -1,0 +1,193 @@
+name: CI/CD Pipeline
+
+# Trigger this workflow on every push to the main branch.
+# Nothing runs on feature branches — only production-bound code goes through the full pipeline.
+on:
+  push:
+    branches:
+      - main
+
+# Minimal top-level permissions. Each job overrides only what it actually needs,
+# following the principle of least privilege.
+permissions:
+  contents: read
+
+# Derive the lowercase image name once so every job uses an identical reference.
+# ghcr.io requires the repository path to be all-lowercase.
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 1 — TEST
+  # Run the full test suite before anything else. If a single test fails the
+  # pipeline stops here: no broken image is ever built or deployed.
+  # ─────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository so the runner has access to the source code.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Set up the exact Node.js version used in the Dockerfile to keep
+      # the test environment consistent with the production image.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      # Install ALL dependencies (including devDependencies: jest, supertest)
+      # because we need them to run the tests. ci ensures a clean, reproducible install.
+      - name: Install dependencies
+        run: npm ci
+        working-directory: app
+
+      # Run the test suite. jest --forceExit ensures the runner does not hang
+      # waiting for open handles after the tests complete.
+      # If any test fails, this step exits non-zero and the pipeline stops.
+      - name: Run tests
+        run: npm test
+        working-directory: app
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2 — BUILD & PUSH
+  # Only runs if every test passed. Builds the Docker image and pushes it to
+  # GitHub Container Registry tagged with the commit SHA for exact traceability.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test  # Hard dependency — this job will not start if 'test' fails.
+
+    # The 'packages: write' permission is required to push images to GHCR.
+    # All other permissions remain read-only.
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      # Expose the exact image tag so the deploy job can reference it without
+      # recomputing the SHA independently.
+      image_tag: ${{ steps.meta.outputs.sha_tag }}
+
+    steps:
+      # Check out the repository so the Dockerfile and app source are available.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Log in to GitHub Container Registry using the short-lived GITHUB_TOKEN
+      # that Actions generates automatically. No long-lived credentials needed.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Set up Docker Buildx to enable BuildKit features (layer caching, etc.)
+      # and multi-platform builds if needed in the future.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Derive image tags: always tag with the short commit SHA for traceability,
+      # and also tag as 'latest' so the server can always pull the newest image
+      # with a predictable name.
+      - name: Derive image tags
+        id: meta
+        run: |
+          SHA_TAG="${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          LATEST_TAG="${{ env.IMAGE_NAME }}:latest"
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image will be tagged as: ${SHA_TAG} and ${LATEST_TAG}"
+
+      # Build the Docker image using the multi-stage Dockerfile and push both tags
+      # to GHCR in a single operation. Layer cache is stored in the registry itself
+      # so subsequent builds only transfer changed layers.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.latest_tag }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 3 — DEPLOY
+  # Only runs after the image is successfully pushed. SSHs into the cloud server,
+  # pulls the new image by its exact SHA tag, and restarts the container.
+  # The previous container is stopped gracefully before the new one starts.
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build-and-push  # Hard dependency — only deploy a successfully built image.
+
+    steps:
+      # Check out the repository so we have access to the docker-compose.yml
+      # if we ever need to copy it to the server (not required here but good practice).
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # SSH into the cloud server and execute the deployment commands remotely.
+      # Secrets SSH_HOST, SSH_USER, and SSH_PRIVATE_KEY must be stored in
+      # GitHub → Settings → Secrets and variables → Actions.
+      # They are never printed in logs and never appear in the repository.
+      - name: Deploy to cloud server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # The deploy script runs on the remote server:
+          # 1. Log in to GHCR using the token passed as an env var (never echoed).
+          # 2. Pull the exact SHA-tagged image to guarantee we deploy this commit.
+          # 3. Stop and remove the currently running container (if any) gracefully.
+          # 4. Start a new container from the freshly pulled image.
+          # 5. Verify the container came up healthy before the step exits.
+          envs: GITHUB_TOKEN,IMAGE_TAG
+          script: |
+            # Authenticate with GHCR on the remote host.
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u github-actions --password-stdin
+
+            # Pull the immutable SHA-tagged image built in the previous job.
+            docker pull "$IMAGE_TAG"
+
+            # Gracefully stop and remove the existing container, if it exists.
+            docker stop kora-app 2>/dev/null || true
+            docker remove kora-app 2>/dev/null || true
+
+            # Start the new container:
+            #   --detach       — run in the background
+            #   --name         — give it a stable name for future operations
+            #   --restart      — auto-restart unless manually stopped
+            #   --publish      — map host port 80 to container port 3000
+            #   --env PORT     — pass the port variable the app reads
+            docker run \
+              --detach \
+              --name kora-app \
+              --restart unless-stopped \
+              --publish 80:3000 \
+              --env PORT=3000 \
+              "$IMAGE_TAG"
+
+            # Wait a moment then confirm the container is running.
+            sleep 5
+            docker ps --filter "name=kora-app" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+            # Hit the health endpoint locally to confirm the app is responding.
+            curl --fail --silent --show-error http://localhost/health \
+              && echo "Health check passed" \
+              || (echo "Health check FAILED" && exit 1)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
