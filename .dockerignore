@@ -1,0 +1,28 @@
+# Git metadata — never needed inside the image
+.git
+.gitignore
+
+# Local environment file — secrets must not be baked into the image
+.env
+
+# Dependency directory — rebuilt from scratch inside the image via npm ci
+app/node_modules
+
+# Test files — not needed in the production image
+app/*.test.js
+app/*.spec.js
+
+# Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+README.md
+DEPLOYMENT.md
+
+# Editor / OS noise
+.vscode
+.idea
+*.DS_Store
+Thumbs.db
