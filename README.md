@@ -1,141 +1,172 @@
-# DeployReady
+# Kora Analytics — DeployReady
 
-This challenge is designed to test your understanding of core DevOps practices: containerisation, automated pipelines, and cloud deployment.
+A containerised, continuously deployed Node.js API for Kora Analytics — a SaaS platform serving data dashboards to logistics companies.
 
----
+This repository demonstrates a production-oriented DevOps setup built from scratch: containerisation, an automated CI/CD pipeline, and cloud deployment on Render.
 
-## 1. Business Context
-
-**Client:** Kora Analytics
-**Industry:** SaaS — Data dashboards for logistics companies
-
-### The Problem
-
-Every time the Kora team wants to deploy a new version of their app, a developer manually SSHs into the server, pulls the code, and restarts the process by hand. There are no automated tests before a release and no way to tell if a deploy broke something until a customer complains.
-
-### Your Role
-
-You are joining as their first DevOps engineer. The application code already works — your job is to **containerise it, automate the delivery pipeline, and get it running on a cloud platform** (AWS, GCP, Azure, or any other cloud provider you are familiar with).
+**Live URL:** https://deployready-assignment-latest.onrender.com
 
 ---
 
-## 2. The Application
+## Architecture Overview
 
-A simple Node.js API is provided in the [`app/`](./app/) directory. It has three endpoints:
-
-| Method | Route      | Description                            |
-| ------ | ---------- | -------------------------------------- |
-| GET    | `/health`  | Returns `{ "status": "ok" }`           |
-| GET    | `/metrics` | Returns uptime and memory usage        |
-| POST   | `/data`    | Accepts a JSON body and echoes it back |
-
-Run it locally:
-
-```bash
-cd app
-npm install
-npm start
+```
+Developer pushes to main
+         │
+         ▼
+┌─────────────────────────────────────────────────────┐
+│              GitHub Actions Pipeline                │
+│                                                     │
+│  ┌──────────┐    ┌───────────────┐    ┌──────────┐ │
+│  │  Test    │───▶│ Build & Push  │───▶│  Deploy  │ │
+│  │ npm test │    │ → GHCR (SHA)  │    │  Render  │ │
+│  └──────────┘    └───────────────┘    └──────────┘ │
+└─────────────────────────────────────────────────────┘
+         │
+         ▼
+  Render pulls :latest from GHCR
+  and restarts the service
 ```
 
-Do not change the application logic. Your work is everything around it.
+The application runs inside a Docker container built from a multi-stage `Dockerfile`. Images are pushed to GitHub Container Registry (GHCR) tagged with the commit SHA for traceability, and deployed to Render via a deploy hook.
 
 ---
 
-## 3. The Assignment
+## The Application
 
-### Part 1 — Containerise the App
+A simple Node.js/Express API with three endpoints:
 
-**Deliverables:** A `Dockerfile` and a `docker-compose.yml` in the root of your repository.
-
-**Dockerfile requirements:**
-
-- The app must run inside a Docker container.
-- The container must accept a `PORT` environment variable.
-- The container must **not** run as the `root` user.
-
-**Docker Compose requirements:**
-
-- Define the app as a service in `docker-compose.yml`.
-- Map port `3000` on the host to the container.
-- Pass the `PORT` variable via an `.env` file (include a `.env.example` with placeholder values).
-- Running the following must start a working API:
-  ```bash
-  docker compose up --build
-  ```
+| Method | Route | Description |
+|---|---|---|
+| GET | `/health` | Returns `{"status":"ok"}` |
+| GET | `/metrics` | Returns uptime, memory usage, and Node version |
+| POST | `/data` | Accepts a JSON body and echoes it back |
 
 ---
 
-### Part 2 — Automate the Pipeline
+## Project Structure
 
-**Deliverable:** A `.github/workflows/deploy.yml` GitHub Actions workflow.
-
-The pipeline must run these steps **in order** on every push to `main`:
-
-1. **Test** — Run `npm test`. If tests fail, the pipeline stops. Nothing gets deployed.
-2. **Build** — Build the Docker image and tag it with the Git commit SHA.
-3. **Push** — Push the image to a container registry (GitHub Container Registry, AWS ECR, GCR, ACR, or equivalent).
-4. **Deploy** — Pull the new image on your cloud server and restart the container.
-
-Additional requirements:
-
-- Secrets (SSH key, registry token) must be stored as **GitHub repository secrets** — never in the code.
-- Add a short comment above each step in the YAML explaining what it does.
-
----
-
-### Part 3 — Deploy to the Cloud
-
-**Deliverable:** A running service on a cloud platform and a short `DEPLOYMENT.md` explaining your setup.
-
-Use **AWS, GCP, Azure, or any other cloud provider you are familiar with**. Provision the following (via the cloud console is fine):
-
-- A **virtual machine** (e.g. AWS EC2 `t2.micro`, GCP `e2-micro`, Azure B1s) with Docker installed.
-- A **firewall / security group** that allows:
-  - HTTP on port 80 from anywhere
-  - SSH on port 22 **from your IP only** — not open to the world
-- A **service account / IAM user or role** for the pipeline with only the permissions it needs.
-
-At submission time, `GET http://<your-server-ip>/health` must return `{ "status": "ok" }`.
-
-Document in `DEPLOYMENT.md`:
-
-- Which cloud provider and service you used, and why
-- How you set up the virtual machine
-- How you installed Docker and pulled your image
-- How to check if the container is running
-- How to view the application logs
+```
+.
+├── .github/
+│   └── workflows/
+│       └── deploy.yml        # CI/CD pipeline (test → build → push → deploy)
+├── app/
+│   ├── index.js              # Express application
+│   ├── index.test.js         # Jest + Supertest test suite
+│   ├── package.json
+│   └── package-lock.json
+├── .dockerignore             # Excludes .env, node_modules, test files
+├── .env.example              # Placeholder env vars — copy to .env to run locally
+├── .gitattributes            # Enforces LF line endings across all platforms
+├── Dockerfile                # Multi-stage production image
+├── docker-compose.yml        # Local development stack
+└── DEPLOYMENT.md             # Full cloud deployment documentation
+```
 
 ---
 
-## 4. Bonus (Optional)
+## Running Locally
 
-Pick **one** of the following if you want to go further:
+**Prerequisites:** Docker and Docker Compose installed.
 
-- **Use Terraform** (or your cloud's IaC tool) to provision the VM and firewall rules instead of the console.
-- **Add a cloud monitoring alarm** (e.g. AWS CloudWatch, GCP Cloud Monitoring, Azure Monitor) that triggers if `/health` stops responding.
-- **Implement a rollback step** in the pipeline that re-deploys the previous image if the health check fails after deploy.
+```bash
+# 1. Clone the repository
+git clone https://github.com/Gery44/DeployReady_Assignment.git
+cd DeployReady_Assignment
 
-Describe what you added and why in your `DEPLOYMENT.md`.
+# 2. Create your local env file
+cp .env.example .env
+
+# 3. Build and start the container
+docker compose up --build
+```
+
+The API will be available at `http://localhost:3000`.
+
+**Verify it's working:**
+```bash
+curl http://localhost:3000/health
+# {"status":"ok"}
+
+curl http://localhost:3000/metrics
+# {"uptime_seconds":12,"memory_mb":54,"node_version":"v20.14.0"}
+
+curl -X POST http://localhost:3000/data \
+  -H "Content-Type: application/json" \
+  -d '{"shipment_id":"KOR-001","status":"in_transit"}'
+# {"received":{"shipment_id":"KOR-001","status":"in_transit"}}
+```
 
 ---
 
-## 5. Submission Instructions
+## CI/CD Pipeline
 
-1. **Fork** this repository.
-2. Complete all three parts in your fork.
-3. **Replace this README** with your own documentation (architecture overview, setup steps, decisions made).
-4. Submit your repo link via the [online form](https://forms.cloud.microsoft/e/f3FF83LVz3).
+Defined in `.github/workflows/deploy.yml`. Triggers on every push to `main`.
+
+### Job 1 — Test
+- Sets up Node 20 with a cached `npm ci` install
+- Runs `jest --forceExit`
+- Pipeline stops immediately if any test fails — nothing gets built or deployed
+
+### Job 2 — Build & Push
+- Builds the Docker image using the multi-stage `Dockerfile`
+- Tags the image with the full commit SHA (immutable) and `latest`
+- Pushes both tags to GitHub Container Registry (GHCR)
+- Uses registry-based layer caching to speed up subsequent builds
+
+### Job 3 — Deploy
+- Calls the `RENDER_DEPLOY_HOOK` GitHub secret via `curl`
+- Render pulls the `:latest` image from GHCR and restarts the service
+
+### Secrets
+
+All secrets are stored in GitHub repository settings — never in code.
+
+| Secret | Purpose |
+|---|---|
+| `RENDER_DEPLOY_HOOK` | Authenticated Render deploy hook URL |
+| `GITHUB_TOKEN` | Auto-generated by Actions — used to push to GHCR |
 
 ---
 
-## ⚠️ Pre-Submission Checklist
+## Docker Setup
 
-- [ ] `docker compose up --build` starts the app locally
-- [ ] A `.env.example` file is committed (the real `.env` is not)
-- [ ] At least one successful pipeline run is visible in the GitHub Actions tab
-- [ ] `GET /health` on your cloud server's public IP returns 200
-- [ ] No secrets or `.pem` files committed to the repository
-- [ ] SSH port 22 is **not** open to the world (`0.0.0.0/0`)
-- [ ] `DEPLOYMENT.md` is present and covers the four points in Part 3
-- [ ] This README has been replaced with your own documentation
-- [ ] Commit history shows progress over time (not a single upload commit)
+### Dockerfile highlights
+
+- **Multi-stage build** — `deps` stage installs production dependencies only (`npm ci --omit=dev`), keeping jest and supertest out of the final image
+- **Pinned base image** — `node:20.14.0-alpine3.20` for reproducible builds
+- **Non-root user** — runs as `appuser:appgroup`, not root
+- **Signal-safe CMD** — `CMD ["node", "index.js"]` as a JSON array so SIGTERM reaches the Node process directly for graceful shutdown
+
+### docker-compose.yml highlights
+
+- Reads environment variables from `.env` via `env_file`
+- Port mapping uses `${PORT:-3000}` to stay in sync with the env file
+- Built-in `healthcheck` polling `GET /health` every 30 seconds
+- `restart: unless-stopped` for automatic recovery after host reboots
+
+---
+
+## Deployment
+
+Full deployment documentation is in [`DEPLOYMENT.md`](./DEPLOYMENT.md), covering:
+
+- Why Render was chosen and the trade-offs vs a raw VM
+- How the Render Web Service was configured to pull from GHCR
+- How to check if the service is running
+- How to view application logs
+
+---
+
+## Decisions Made
+
+**Multi-stage Dockerfile** — separating the dependency install stage from the production stage means devDependencies never make it into the final image. Smaller image, smaller attack surface.
+
+**GHCR over Docker Hub** — GHCR is scoped to the repository and uses the auto-generated `GITHUB_TOKEN`. No external account, no rotating credentials, no extra secrets to manage.
+
+**Commit SHA tagging** — every image pushed to GHCR is tagged with the exact commit SHA. You always know precisely which version of the code is running in production.
+
+**Render over a raw VM** — for the scope of this challenge, Render eliminates VM provisioning, OS patching, and SSH key management while still running the exact Docker image built and tested in CI. The trade-offs (no direct OS access, less control over networking) are acceptable here and documented in `DEPLOYMENT.md`.
+
+**`.gitattributes`** — enforces LF line endings across all contributors and CI runners, preventing shell scripts and YAML files from breaking on Linux runners when developed on Windows.
