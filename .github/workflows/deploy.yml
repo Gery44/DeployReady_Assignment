@@ -12,11 +12,6 @@ on:
 permissions:
   contents: read
 
-# Derive the lowercase image name once so every job uses an identical reference.
-# ghcr.io requires the repository path to be all-lowercase.
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}
-
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 1 — TEST
@@ -94,23 +89,29 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Derive image tags: always tag with the short commit SHA for traceability,
-      # and also tag as 'latest' so the server can always pull the newest image
-      # with a predictable name.
+      # Derive image tags in lowercase — GHCR requires the full repository path
+      # to be lowercase. github.repository may contain uppercase letters
+      # (e.g. "Gery44/DeployReady_Assignment"), so we normalise with tr here.
+      # Tags the image with the full commit SHA (immutable, traceable) and
+      # with 'latest' as a convenience alias for Render to pull.
       - name: Derive image tags
         id: meta
         run: |
-          SHA_TAG="${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          LATEST_TAG="${{ env.IMAGE_NAME }}:latest"
-          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_BASE="ghcr.io/${REPO_LOWER}"
+          SHA_TAG="${IMAGE_BASE}:${{ github.sha }}"
+          LATEST_TAG="${IMAGE_BASE}:latest"
+          CACHE_TAG="${IMAGE_BASE}:buildcache"
+          echo "sha_tag=${SHA_TAG}"       >> "$GITHUB_OUTPUT"
           echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "cache_tag=${CACHE_TAG}"   >> "$GITHUB_OUTPUT"
           echo "Image will be tagged as: ${SHA_TAG} and ${LATEST_TAG}"
 
       # Build the Docker image using the multi-stage Dockerfile and push both tags
       # to GHCR in a single operation. Layer cache is stored in the registry itself
       # so subsequent builds only transfer changed layers.
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
@@ -118,14 +119,15 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.sha_tag }}
             ${{ steps.meta.outputs.latest_tag }}
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ steps.meta.outputs.cache_tag }}
+          cache-to: type=registry,ref=${{ steps.meta.outputs.cache_tag }},mode=max
 
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 3 — DEPLOY
-  # Only runs after the image is successfully pushed. SSHs into the cloud server,
-  # pulls the new image by its exact SHA tag, and restarts the container.
-  # The previous container is stopped gracefully before the new one starts.
+  # Only runs after the image is successfully pushed to GHCR.
+  # Triggers a Render deployment by calling the service's deploy hook URL.
+  # Render pulls the latest image from GHCR and restarts the service automatically.
+  # The deploy hook URL is stored as a GitHub secret — never hardcoded here.
   # ─────────────────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy
@@ -133,61 +135,13 @@ jobs:
     needs: build-and-push  # Hard dependency — only deploy a successfully built image.
 
     steps:
-      # Check out the repository so we have access to the docker-compose.yml
-      # if we ever need to copy it to the server (not required here but good practice).
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # SSH into the cloud server and execute the deployment commands remotely.
-      # Secrets SSH_HOST, SSH_USER, and SSH_PRIVATE_KEY must be stored in
-      # GitHub → Settings → Secrets and variables → Actions.
-      # They are never printed in logs and never appear in the repository.
-      - name: Deploy to cloud server via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # The deploy script runs on the remote server:
-          # 1. Log in to GHCR using the token passed as an env var (never echoed).
-          # 2. Pull the exact SHA-tagged image to guarantee we deploy this commit.
-          # 3. Stop and remove the currently running container (if any) gracefully.
-          # 4. Start a new container from the freshly pulled image.
-          # 5. Verify the container came up healthy before the step exits.
-          envs: GITHUB_TOKEN,IMAGE_TAG
-          script: |
-            # Authenticate with GHCR on the remote host.
-            echo "$GITHUB_TOKEN" | docker login ghcr.io -u github-actions --password-stdin
-
-            # Pull the immutable SHA-tagged image built in the previous job.
-            docker pull "$IMAGE_TAG"
-
-            # Gracefully stop and remove the existing container, if it exists.
-            docker stop kora-app 2>/dev/null || true
-            docker remove kora-app 2>/dev/null || true
-
-            # Start the new container:
-            #   --detach       — run in the background
-            #   --name         — give it a stable name for future operations
-            #   --restart      — auto-restart unless manually stopped
-            #   --publish      — map host port 80 to container port 3000
-            #   --env PORT     — pass the port variable the app reads
-            docker run \
-              --detach \
-              --name kora-app \
-              --restart unless-stopped \
-              --publish 80:3000 \
-              --env PORT=3000 \
-              "$IMAGE_TAG"
-
-            # Wait a moment then confirm the container is running.
-            sleep 5
-            docker ps --filter "name=kora-app" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-            # Hit the health endpoint locally to confirm the app is responding.
-            curl --fail --silent --show-error http://localhost/health \
-              && echo "Health check passed" \
-              || (echo "Health check FAILED" && exit 1)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+      # Trigger the Render deploy hook. Render will pull the ':latest' image that
+      # was just pushed to GHCR in the previous job and restart the service.
+      # RENDER_DEPLOY_HOOK is stored as a GitHub repository secret — it contains
+      # the full hook URL including the service ID and secret key.
+      - name: Trigger Render deployment
+        run: |
+          echo "Triggering Render deployment for image: ${{ needs.build-and-push.outputs.image_tag }}"
+          curl --fail --silent --show-error \
+            "${{ secrets.RENDER_DEPLOY_HOOK }}"
+          echo "Render deployment triggered successfully"
