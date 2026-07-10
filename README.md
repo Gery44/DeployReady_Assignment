@@ -10,23 +10,7 @@ This repository demonstrates a production-oriented DevOps setup built from scrat
 
 ## Architecture Overview
 
-```
-Developer pushes to main
-         │
-         ▼
-┌─────────────────────────────────────────────────────┐
-│              GitHub Actions Pipeline                │
-│                                                     │
-│  ┌──────────┐    ┌───────────────┐    ┌──────────┐ │
-│  │  Test    │───▶│ Build & Push  │───▶│  Deploy  │ │
-│  │ npm test │    │ → GHCR (SHA)  │    │  Render  │ │
-│  └──────────┘    └───────────────┘    └──────────┘ │
-└─────────────────────────────────────────────────────┘
-         │
-         ▼
-  Render pulls :latest from GHCR
-  and restarts the service
-```
+![Architecture Overview](docs/architecture.png)
 
 The application runs inside a Docker container built from a multi-stage `Dockerfile`. Images are pushed to GitHub Container Registry (GHCR) tagged with the commit SHA for traceability, and deployed to Render via a deploy hook.
 
